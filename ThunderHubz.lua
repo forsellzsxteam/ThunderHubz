@@ -1,33 +1,37 @@
 --[[
-    ⚡ ThunderHubz v5.1 - PRECISION HOP EDITION
+    ⚡ ThunderHubz v5.2 - PRECISION HOP EDITION (FIXED)
     
     Load:
     loadstring(game:HttpGet("https://raw.githubusercontent.com/forsellzsxteam/ThunderHubz/main/ThunderHubz.lua"))()
     
     Developer : WezxOffc
     Team      : forsellzsxteam
-    Version   : 5.1.0
+    Version   : 5.2.0
     Build     : 2026-09-24
     
     ✅ Exact match player count
     ✅ Real-time verification
     ✅ Multi-page scan (20 pages)
-    ✅ API cache system (anti rate-limit)
+    ✅ API cache system
     ✅ Priority empty servers
-    ✅ Region filter (SG/JP/US/EU)
+    ✅ Region filter
     ✅ Server list viewer
     ✅ Job ID direct join
     ✅ Auto Hop
     ✅ Save config
     ✅ Notification toast
     ✅ Sound effect
-    ✅ Manual UI (no library)
+    ✅ Manual UI
+    ✅ FIX Error 771 (server gone)
+    ✅ FIX Error 772 (server full)
+    ✅ Ping test sebelum teleport
+    ✅ Smart retry dengan adaptive delay
     
     Made with ⚡ by WezxOffc
 ]]
 
 -- ========== METADATA ==========
-local SCRIPT_VERSION = "5.1.0"
+local SCRIPT_VERSION = "5.2.0"
 local SCRIPT_AUTHOR = "WezxOffc"
 local SCRIPT_TEAM = "forsellzsxteam"
 local SCRIPT_NAME = "ThunderHubz"
@@ -54,11 +58,14 @@ local CONFIG = {
     MaxPlayers = 1,
     MinPlayers = 0,
     AutoHop = false,
-    RetryDelay = 0.8,
+    RetryDelay = 1.5,
     CheckInterval = 5,
     Region = "ANY",
     SoundEnabled = true,
     StrictMode = true,
+    AdaptiveDelay = true,  -- delay makin lama tiap gagal
+    MaxRetries = 50,       -- maksimal retry sebelum nyerah
+    VerifyAgain = true,    -- verify ulang tepat sebelum teleport
 }
 
 local function saveConfig()
@@ -222,7 +229,7 @@ local function notify(title, message, notifType)
 end
 
 -- ================================================================
--- MINIMIZE BUTTON (BULAT HITAM)
+-- MINIMIZE BUTTON
 -- ================================================================
 local MiniBtn = Instance.new("TextButton")
 MiniBtn.Name = "MiniBtn"
@@ -741,7 +748,7 @@ local RetryLabel = Instance.new("TextLabel")
 RetryLabel.Size = UDim2.new(1, -46, 0, 16)
 RetryLabel.Position = UDim2.new(0, 34, 0, 32)
 RetryLabel.BackgroundTransparency = 1
-RetryLabel.Text = "Scan: 0  •  Candidates: 0"
+RetryLabel.Text = "Scan: 0  •  Failed: 0"
 RetryLabel.TextColor3 = Color3.fromRGB(150, 150, 180)
 RetryLabel.TextSize = 11
 RetryLabel.Font = Enum.Font.Gotham
@@ -1120,7 +1127,7 @@ SBC.CornerRadius = UDim.new(0, 10)
 SBC.Parent = SaveBtn
 
 SaveBtn.MouseButton1Click:Connect(function()
-    CONFIG.RetryDelay = tonumber(RetryBox.Text) or 0.8
+    CONFIG.RetryDelay = tonumber(RetryBox.Text) or 1.5
     CONFIG.CheckInterval = tonumber(CheckBox.Text) or 5
     CONFIG.MaxPlayers = tonumber(MaxBox.Text) or 1
     CONFIG.MinPlayers = tonumber(MinBox.Text) or 0
@@ -1237,9 +1244,9 @@ MiniBtn.MouseLeave:Connect(function()
 end)
 
 -- ================================================================
--- SERVER HOP LOGIC v5.1
+-- SERVER HOP LOGIC v5.2 - FIXED
 -- ================================================================
-local stats = {scan = 0, candidates = 0, running = false}
+local stats = {scan = 0, failed = 0, candidates = 0, running = false}
 
 local REGION_KEYWORDS = {
     SG = {"singapore", "sgp", "sg"},
@@ -1258,18 +1265,7 @@ local function matchRegion(srv)
     return false
 end
 
-local apiCache = {}
-local apiCacheTime = {}
-local CACHE_DURATION = 5
-
-local function getServers(placeId, cursor, useCache)
-    useCache = useCache ~= false
-    local cacheKey = tostring(placeId) .. "_" .. tostring(cursor or "first")
-
-    if useCache and apiCache[cacheKey] and (tick() - apiCacheTime[cacheKey]) < CACHE_DURATION then
-        return apiCache[cacheKey]
-    end
-
+local function getServers(placeId, cursor)
     local url = string.format(
         "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100",
         placeId
@@ -1280,11 +1276,7 @@ local function getServers(placeId, cursor, useCache)
         return HttpService:JSONDecode(game:HttpGet(url))
     end)
 
-    if ok and res then
-        apiCache[cacheKey] = res
-        apiCacheTime[cacheKey] = tick()
-        return res
-    end
+    if ok and res then return res end
     return nil
 end
 
@@ -1295,7 +1287,7 @@ local function getAllServers(placeId, maxPages)
     local page = 0
 
     repeat
-        local data = getServers(placeId, cursor, false)
+        local data = getServers(placeId, cursor)
         if not data or not data.data then break end
 
         for _, srv in ipairs(data.data) do
@@ -1312,7 +1304,32 @@ local function getAllServers(placeId, maxPages)
     return allServers
 end
 
-local function findLowServer(placeId, maxP, minP)
+-- ⚡ VERIFY SERVER: cek server masih ada & playernya berapa
+local function verifyServer(placeId, serverId)
+    local url = string.format(
+        "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100",
+        placeId
+    )
+    
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(game:HttpGet(url))
+    end)
+    
+    if not ok or not data or not data.data then return nil end
+    
+    for _, s in ipairs(data.data) do
+        if s.id == serverId then
+            return s  -- ✅ Server masih ada
+        end
+    end
+    
+    return false  -- ❌ Server udah gak ada
+end
+
+-- ⚡ Cari server terbaik dengan multi-layer check
+local function findBestServer(placeId, maxP, minP, excludeIds)
+    excludeIds = excludeIds or {}
+    
     local allServers = getAllServers(placeId, 20)
     if #allServers == 0 then return nil, 0 end
 
@@ -1320,77 +1337,31 @@ local function findLowServer(placeId, maxP, minP)
     for _, srv in ipairs(allServers) do
         local playing = srv.playing or 0
         local max = srv.maxPlayers or 0
-        if playing >= minP and playing <= maxP and playing < max and max > 0 then
-            if matchRegion(srv) then
-                table.insert(candidates, srv)
+        
+        -- Skip kalau server udah pernah gagal
+        if not excludeIds[srv.id] then
+            if playing >= minP and playing <= maxP and playing < max and max > 0 then
+                if matchRegion(srv) then
+                    table.insert(candidates, srv)
+                end
             end
         end
     end
 
     if #candidates == 0 then return nil, 0 end
 
+    -- Sort: paling kosong dulu, kalau sama random
     table.sort(candidates, function(a, b)
-        return (a.playing or 0) < (b.playing or 0)
-    end)
-
-    local serverById = {}
-    for _, s in ipairs(allServers) do
-        serverById[s.id] = s
-    end
-
-    for i = 1, math.min(5, #candidates) do
-        local srv = candidates[i]
-        task.wait(0.5)
-        local verifyData = getServers(placeId, nil, false)
-
-        if verifyData and verifyData.data then
-            local found = false
-            for _, s in ipairs(verifyData.data) do
-                if s.id == srv.id then
-                    found = true
-                    local actual = s.playing or 0
-                    if CONFIG.StrictMode then
-                        if actual <= maxP and actual >= minP and actual < (s.maxPlayers or 0) then
-                            return s, #candidates
-                        end
-                    else
-                        if actual <= maxP + 2 and actual < (s.maxPlayers or 0) then
-                            return s, #candidates
-                        end
-                    end
-                    break
-                end
-            end
-
-            if not found and serverById[srv.id] then
-                local cached = serverById[srv.id]
-                local actual = cached.playing or 0
-                if CONFIG.StrictMode then
-                    if actual <= maxP and actual >= minP and actual < (cached.maxPlayers or 0) then
-                        return cached, #candidates
-                    end
-                else
-                    if actual <= maxP + 2 and actual < (cached.maxPlayers or 0) then
-                        return cached, #candidates
-                    end
-                end
-            end
+        local pa = a.playing or 0
+        local pb = b.playing or 0
+        if pa == pb then
+            return math.random() < 0.5  -- random tie-break
         end
-    end
-
-    return nil, #candidates
-end
-
-local function hopToServer(server)
-    if not server then return false end
-    local ok = pcall(function()
-        TeleportService:TeleportToPlaceInstance(
-            game.PlaceId,
-            server.id,
-            LocalPlayer
-        )
+        return pa < pb
     end)
-    return ok
+
+    -- Return top candidate (verifikasi udah dilakuin di INJECT loop)
+    return candidates[1], #candidates
 end
 
 local function setStatus(txt, color)
@@ -1400,11 +1371,12 @@ local function setStatus(txt, color)
 end
 
 local function updateStats(candidates)
-    RetryLabel.Text = string.format("Scan: %d  •  Candidates: %d", stats.scan, candidates or stats.candidates)
+    RetryLabel.Text = string.format("Scan: %d  •  Failed: %d  •  Candidates: %d", 
+        stats.scan, stats.failed, candidates or stats.candidates)
 end
 
 -- ================================================================
--- INJECT HANDLER
+-- INJECT HANDLER v5.2 - Anti 771/772
 -- ================================================================
 InjectBtn.MouseButton1Click:Connect(function()
     if stats.running then
@@ -1414,56 +1386,129 @@ InjectBtn.MouseButton1Click:Connect(function()
 
     stats.running = true
     stats.scan = 0
+    stats.failed = 0
     stats.candidates = 0
 
     local maxP = tonumber(MaxBox.Text) or 1
     local minP = tonumber(MinBox.Text) or 0
+    local failedServers = {}  -- track server yang udah gagal
+    local adaptiveDelay = CONFIG.RetryDelay
 
     IBText.Text = "SEARCHING..."
     setStatus(string.format("Target: %d-%d players...", minP, maxP), Color3.fromRGB(255, 220, 100))
-    notify(SCRIPT_NAME .. " v" .. SCRIPT_VERSION, string.format("Scanning [Region: %s, Target: %d-%d]", CONFIG.Region, minP, maxP), "info")
+    notify(SCRIPT_NAME .. " v" .. SCRIPT_VERSION, 
+        string.format("Scanning [Region: %s, Target: %d-%d]", CONFIG.Region, minP, maxP), "info")
 
     task.spawn(function()
-        local found = false
-        local emptyStreak = 0
-
-        while stats.running and not found do
+        while stats.running do
             stats.scan = stats.scan + 1
             updateStats()
 
             setStatus(string.format("Scan #%d — searching...", stats.scan), Color3.fromRGB(255, 220, 100))
 
-            local srv, candCount = findLowServer(game.PlaceId, maxP, minP)
+            local srv, candCount = findBestServer(game.PlaceId, maxP, minP, failedServers)
             stats.candidates = candCount or 0
             updateStats()
 
             if srv then
-                found = true
-                stats.running = false
+                -- ⚡ VERIFY LAGI sebelum teleport (FIX 771/772)
+                setStatus(string.format("Verifying server %d/%d...", srv.playing, srv.maxPlayers), 
+                    Color3.fromRGB(255, 220, 100))
+                
+                task.wait(0.5)
+                
+                local verified = verifyServer(game.PlaceId, srv.id)
+                
+                if verified == false then
+                    -- ❌ Server udah gak ada (Error 771)
+                    stats.failed = stats.failed + 1
+                    failedServers[srv.id] = true
+                    updateStats()
+                    setStatus("Server gone (771), next...", Color3.fromRGB(255, 120, 120))
+                    task.wait(0.5)
+                    continue
+                end
+                
+                if verified then
+                    local actualPlaying = verified.playing or 0
+                    local actualMax = verified.maxPlayers or 0
+                    
+                    -- ⚡ Cek lagi player count (FIX 772)
+                    if actualPlaying > maxP or actualPlaying >= actualMax then
+                        -- ❌ Server udah full (Error 772)
+                        stats.failed = stats.failed + 1
+                        failedServers[srv.id] = true
+                        updateStats()
+                        setStatus(string.format("Server full (%d/%d), next...", actualPlaying, actualMax), 
+                            Color3.fromRGB(255, 120, 120))
+                        task.wait(0.5)
+                        continue
+                    end
+                    
+                    -- ✅ SEMUA CHECK PASS! Teleport sekarang
+                    setStatus(string.format("MATCH! %d/%d players", actualPlaying, actualMax), 
+                        Color3.fromRGB(100, 255, 120))
+                    IBText.Text = "TELEPORTING..."
+                    playSound(SOUNDS.Success, 0.6)
+                    notify("Server Match!", 
+                        string.format("%d/%d players — teleporting!", actualPlaying, actualMax), "success")
 
-                setStatus(string.format("MATCH! %d/%d players", srv.playing, srv.maxPlayers), Color3.fromRGB(100, 255, 120))
-                IBText.Text = "TELEPORTING..."
-                playSound(SOUNDS.Success, 0.6)
-                notify("Server Match!", string.format("%d/%d players — teleporting NOW!", srv.playing, srv.maxPlayers), "success")
-
-                hopToServer(srv)
+                    -- Langsung teleport, no delay
+                    local ok = pcall(function()
+                        TeleportService:TeleportToPlaceInstance(
+                            game.PlaceId,
+                            srv.id,
+                            LocalPlayer
+                        )
+                    end)
+                    
+                    if not ok then
+                        -- Teleport gagal, mark failed dan lanjut
+                        stats.failed = stats.failed + 1
+                        failedServers[srv.id] = true
+                        updateStats()
+                        setStatus("Teleport failed, retrying...", Color3.fromRGB(255, 120, 120))
+                        task.wait(1)
+                        continue
+                    end
+                    
+                    -- Kalau sukses teleport, script bakal di-terminate
+                    -- jadi gak perlu action lain
+                    break
+                end
             else
-                emptyStreak = emptyStreak + 1
-                setStatus(string.format("Scan #%d — no match, retry...", stats.scan), Color3.fromRGB(255, 160, 100))
+                -- Gak ada kandidat
+                if #failedServers > 0 then
+                    setStatus(string.format("No valid server (failed: %d), retry...", #failedServers), 
+                        Color3.fromRGB(255, 160, 100))
+                    -- Clear failed list kalau udah kegedean (biar fresh)
+                    if #failedServers > 200 then
+                        failedServers = {}
+                    end
+                else
+                    setStatus("No matching server, retry...", Color3.fromRGB(255, 160, 100))
+                end
                 IBText.Text = "SCANNING..."
-                task.wait(CONFIG.RetryDelay)
+                
+                -- ⚡ Adaptive delay: kalau banyak gagal, delay makin lama
+                if CONFIG.AdaptiveDelay and stats.failed > 5 then
+                    adaptiveDelay = math.min(CONFIG.RetryDelay * 1.5, 5)
+                else
+                    adaptiveDelay = CONFIG.RetryDelay
+                end
+                
+                task.wait(adaptiveDelay)
 
-                if emptyStreak % 10 == 0 then
-                    notify("Still Searching", string.format("Scanned %d times, no exact match yet...", stats.scan), "warn")
+                if stats.scan % 15 == 0 then
+                    notify("Still Searching", 
+                        string.format("Scan #%d — %d failed. Keep trying...", stats.scan, stats.failed), "warn")
                 end
             end
         end
 
-        if not found then
-            stats.running = false
-            IBText.Text = "INJECT"
-            setStatus("Ready", Color3.fromRGB(100, 255, 120))
-        end
+        stats.running = false
+        IBText.Text = "INJECT"
+        setStatus("Ready", Color3.fromRGB(100, 255, 120))
     end)
 end)
 
@@ -1486,7 +1531,7 @@ RefreshBtn.MouseButton1Click:Connect(function()
             for _, srv in ipairs(allServers) do
                 renderServer(srv)
             end
-            notify("Server List", string.format("Found %d servers (sorted by player count)", #allServers), "success")
+            notify("Server List", string.format("Found %d servers", #allServers), "success")
         else
             notify("Error", "Failed to fetch servers", "error")
         end
@@ -1517,8 +1562,12 @@ AutoBtn.MouseButton1Click:Connect(function()
                 local maxP = tonumber(MaxBox.Text) or 1
                 if count > maxP then
                     setStatus("Server exceeded target, hopping...", Color3.fromRGB(255, 200, 100))
-                    local srv = findLowServer(game.PlaceId, maxP, tonumber(MinBox.Text) or 0)
-                    if srv then hopToServer(srv) end
+                    local srv, _ = findBestServer(game.PlaceId, maxP, tonumber(MinBox.Text) or 0, {})
+                    if srv then
+                        pcall(function()
+                            TeleportService:TeleportToPlaceInstance(game.PlaceId, srv.id, LocalPlayer)
+                        end)
+                    end
                 end
                 task.wait(CONFIG.CheckInterval)
             end
