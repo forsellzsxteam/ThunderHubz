@@ -10,7 +10,7 @@
     Build     : 2026-09-24
     
     ✅ Exact match player count
-    ✅ Real-time verification
+    ✅ Real-time verification (double check)
     ✅ Multi-page scan (20 pages)
     ✅ API cache system
     ✅ Priority empty servers
@@ -24,8 +24,9 @@
     ✅ Manual UI
     ✅ FIX Error 771 (server gone)
     ✅ FIX Error 772 (server full)
-    ✅ Ping test sebelum teleport
-    ✅ Smart retry dengan adaptive delay
+    ✅ Verify server tepat sebelum teleport
+    ✅ Track failed servers (skip kalau udah gagal)
+    ✅ Adaptive delay (delay makin lama tiap gagal)
     
     Made with ⚡ by WezxOffc
 ]]
@@ -63,9 +64,7 @@ local CONFIG = {
     Region = "ANY",
     SoundEnabled = true,
     StrictMode = true,
-    AdaptiveDelay = true,  -- delay makin lama tiap gagal
-    MaxRetries = 50,       -- maksimal retry sebelum nyerah
-    VerifyAgain = true,    -- verify ulang tepat sebelum teleport
+    AdaptiveDelay = true,
 }
 
 local function saveConfig()
@@ -748,7 +747,7 @@ local RetryLabel = Instance.new("TextLabel")
 RetryLabel.Size = UDim2.new(1, -46, 0, 16)
 RetryLabel.Position = UDim2.new(0, 34, 0, 32)
 RetryLabel.BackgroundTransparency = 1
-RetryLabel.Text = "Scan: 0  •  Failed: 0"
+RetryLabel.Text = "Scan: 0  •  Failed: 0  •  Candidates: 0"
 RetryLabel.TextColor3 = Color3.fromRGB(150, 150, 180)
 RetryLabel.TextSize = 11
 RetryLabel.Font = Enum.Font.Gotham
@@ -1244,7 +1243,7 @@ MiniBtn.MouseLeave:Connect(function()
 end)
 
 -- ================================================================
--- SERVER HOP LOGIC v5.2 - FIXED
+-- SERVER HOP LOGIC v5.2 - FIX 771 & 772
 -- ================================================================
 local stats = {scan = 0, failed = 0, candidates = 0, running = false}
 
@@ -1304,41 +1303,40 @@ local function getAllServers(placeId, maxPages)
     return allServers
 end
 
--- ⚡ VERIFY SERVER: cek server masih ada & playernya berapa
+-- ⚡ Verifikasi server: cek masih ada & player count terbaru
 local function verifyServer(placeId, serverId)
     local url = string.format(
         "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100",
         placeId
     )
-    
+
     local ok, data = pcall(function()
         return HttpService:JSONDecode(game:HttpGet(url))
     end)
-    
+
     if not ok or not data or not data.data then return nil end
-    
+
     for _, s in ipairs(data.data) do
         if s.id == serverId then
-            return s  -- ✅ Server masih ada
+            return s
         end
     end
-    
-    return false  -- ❌ Server udah gak ada
+
+    return false
 end
 
--- ⚡ Cari server terbaik dengan multi-layer check
-local function findBestServer(placeId, maxP, minP, excludeIds)
+-- ⚡ Cari kandidat server terbaik
+local function findCandidates(placeId, maxP, minP, excludeIds)
     excludeIds = excludeIds or {}
-    
+
     local allServers = getAllServers(placeId, 20)
-    if #allServers == 0 then return nil, 0 end
+    if #allServers == 0 then return {}, 0 end
 
     local candidates = {}
     for _, srv in ipairs(allServers) do
         local playing = srv.playing or 0
         local max = srv.maxPlayers or 0
-        
-        -- Skip kalau server udah pernah gagal
+
         if not excludeIds[srv.id] then
             if playing >= minP and playing <= maxP and playing < max and max > 0 then
                 if matchRegion(srv) then
@@ -1348,20 +1346,12 @@ local function findBestServer(placeId, maxP, minP, excludeIds)
         end
     end
 
-    if #candidates == 0 then return nil, 0 end
-
-    -- Sort: paling kosong dulu, kalau sama random
+    -- Sort: paling kosong dulu
     table.sort(candidates, function(a, b)
-        local pa = a.playing or 0
-        local pb = b.playing or 0
-        if pa == pb then
-            return math.random() < 0.5  -- random tie-break
-        end
-        return pa < pb
+        return (a.playing or 0) < (b.playing or 0)
     end)
 
-    -- Return top candidate (verifikasi udah dilakuin di INJECT loop)
-    return candidates[1], #candidates
+    return candidates, #candidates
 end
 
 local function setStatus(txt, color)
@@ -1371,12 +1361,12 @@ local function setStatus(txt, color)
 end
 
 local function updateStats(candidates)
-    RetryLabel.Text = string.format("Scan: %d  •  Failed: %d  •  Candidates: %d", 
+    RetryLabel.Text = string.format("Scan: %d  •  Failed: %d  •  Candidates: %d",
         stats.scan, stats.failed, candidates or stats.candidates)
 end
 
 -- ================================================================
--- INJECT HANDLER v5.2 - Anti 771/772
+-- INJECT HANDLER v5.2
 -- ================================================================
 InjectBtn.MouseButton1Click:Connect(function()
     if stats.running then
@@ -1391,12 +1381,12 @@ InjectBtn.MouseButton1Click:Connect(function()
 
     local maxP = tonumber(MaxBox.Text) or 1
     local minP = tonumber(MinBox.Text) or 0
-    local failedServers = {}  -- track server yang udah gagal
+    local failedServers = {}
     local adaptiveDelay = CONFIG.RetryDelay
 
     IBText.Text = "SEARCHING..."
     setStatus(string.format("Target: %d-%d players...", minP, maxP), Color3.fromRGB(255, 220, 100))
-    notify(SCRIPT_NAME .. " v" .. SCRIPT_VERSION, 
+    notify(SCRIPT_NAME .. " v" .. SCRIPT_VERSION,
         string.format("Scanning [Region: %s, Target: %d-%d]", CONFIG.Region, minP, maxP), "info")
 
     task.spawn(function()
@@ -1406,103 +1396,102 @@ InjectBtn.MouseButton1Click:Connect(function()
 
             setStatus(string.format("Scan #%d — searching...", stats.scan), Color3.fromRGB(255, 220, 100))
 
-            local srv, candCount = findBestServer(game.PlaceId, maxP, minP, failedServers)
-            stats.candidates = candCount or 0
+            local candidates, candCount = findCandidates(game.PlaceId, maxP, minP, failedServers)
+            stats.candidates = candCount
             updateStats()
 
-            if srv then
-                -- ⚡ VERIFY LAGI sebelum teleport (FIX 771/772)
-                setStatus(string.format("Verifying server %d/%d...", srv.playing, srv.maxPlayers), 
-                    Color3.fromRGB(255, 220, 100))
-                
-                task.wait(0.5)
-                
-                local verified = verifyServer(game.PlaceId, srv.id)
-                
-                if verified == false then
-                    -- ❌ Server udah gak ada (Error 771)
-                    stats.failed = stats.failed + 1
-                    failedServers[srv.id] = true
-                    updateStats()
-                    setStatus("Server gone (771), next...", Color3.fromRGB(255, 120, 120))
+            if #candidates > 0 then
+                -- Ambil top 3 kandidat, coba verifikasi satu-satu
+                local verified = nil
+                for i = 1, math.min(3, #candidates) do
+                    local srv = candidates[i]
+
+                    setStatus(string.format("Verifying %d/%d...", srv.playing, srv.maxPlayers),
+                        Color3.fromRGB(255, 220, 100))
+
                     task.wait(0.5)
-                    continue
-                end
-                
-                if verified then
-                    local actualPlaying = verified.playing or 0
-                    local actualMax = verified.maxPlayers or 0
-                    
-                    -- ⚡ Cek lagi player count (FIX 772)
-                    if actualPlaying > maxP or actualPlaying >= actualMax then
-                        -- ❌ Server udah full (Error 772)
+
+                    local check = verifyServer(game.PlaceId, srv.id)
+
+                    if check == false then
+                        -- ❌ Server gone (771)
                         stats.failed = stats.failed + 1
                         failedServers[srv.id] = true
                         updateStats()
-                        setStatus(string.format("Server full (%d/%d), next...", actualPlaying, actualMax), 
-                            Color3.fromRGB(255, 120, 120))
-                        task.wait(0.5)
-                        continue
+                        setStatus("Server gone (771), next...", Color3.fromRGB(255, 120, 120))
+                        task.wait(0.3)
+                    elseif check then
+                        local actualPlaying = check.playing or 0
+                        local actualMax = check.maxPlayers or 0
+
+                        if actualPlaying > maxP or actualPlaying >= actualMax then
+                            -- ❌ Server full (772)
+                            stats.failed = stats.failed + 1
+                            failedServers[srv.id] = true
+                            updateStats()
+                            setStatus(string.format("Full (%d/%d), next...", actualPlaying, actualMax),
+                                Color3.fromRGB(255, 120, 120))
+                            task.wait(0.3)
+                        else
+                            -- ✅ SEMUA CHECK PASS
+                            verified = check
+                            break
+                        end
+                    else
+                        -- Gagal verify, skip
+                        stats.failed = stats.failed + 1
+                        failedServers[srv.id] = true
+                        updateStats()
                     end
-                    
-                    -- ✅ SEMUA CHECK PASS! Teleport sekarang
-                    setStatus(string.format("MATCH! %d/%d players", actualPlaying, actualMax), 
+                end
+
+                if verified then
+                    -- Teleport
+                    setStatus(string.format("MATCH! %d/%d players", verified.playing, verified.maxPlayers),
                         Color3.fromRGB(100, 255, 120))
                     IBText.Text = "TELEPORTING..."
                     playSound(SOUNDS.Success, 0.6)
-                    notify("Server Match!", 
-                        string.format("%d/%d players — teleporting!", actualPlaying, actualMax), "success")
+                    notify("Server Match!",
+                        string.format("%d/%d players — teleporting!", verified.playing, verified.maxPlayers),
+                        "success")
 
-                    -- Langsung teleport, no delay
                     local ok = pcall(function()
-                        TeleportService:TeleportToPlaceInstance(
-                            game.PlaceId,
-                            srv.id,
-                            LocalPlayer
-                        )
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, verified.id, LocalPlayer)
                     end)
-                    
+
                     if not ok then
-                        -- Teleport gagal, mark failed dan lanjut
                         stats.failed = stats.failed + 1
-                        failedServers[srv.id] = true
+                        failedServers[verified.id] = true
                         updateStats()
                         setStatus("Teleport failed, retrying...", Color3.fromRGB(255, 120, 120))
                         task.wait(1)
-                        continue
+                    else
+                        -- Sukses, break
+                        break
                     end
-                    
-                    -- Kalau sukses teleport, script bakal di-terminate
-                    -- jadi gak perlu action lain
-                    break
                 end
             else
-                -- Gak ada kandidat
-                if #failedServers > 0 then
-                    setStatus(string.format("No valid server (failed: %d), retry...", #failedServers), 
-                        Color3.fromRGB(255, 160, 100))
-                    -- Clear failed list kalau udah kegedean (biar fresh)
-                    if #failedServers > 200 then
-                        failedServers = {}
-                    end
-                else
-                    setStatus("No matching server, retry...", Color3.fromRGB(255, 160, 100))
-                end
+                setStatus("No candidates, retry...", Color3.fromRGB(255, 160, 100))
                 IBText.Text = "SCANNING..."
-                
-                -- ⚡ Adaptive delay: kalau banyak gagal, delay makin lama
+
                 if CONFIG.AdaptiveDelay and stats.failed > 5 then
                     adaptiveDelay = math.min(CONFIG.RetryDelay * 1.5, 5)
                 else
                     adaptiveDelay = CONFIG.RetryDelay
                 end
-                
+
                 task.wait(adaptiveDelay)
 
                 if stats.scan % 15 == 0 then
-                    notify("Still Searching", 
+                    notify("Still Searching",
                         string.format("Scan #%d — %d failed. Keep trying...", stats.scan, stats.failed), "warn")
                 end
+            end
+
+            -- Reset failed list kalau kegedean
+            if stats.failed > 200 then
+                failedServers = {}
+                stats.failed = 0
             end
         end
 
@@ -1561,11 +1550,11 @@ AutoBtn.MouseButton1Click:Connect(function()
                 local count = #Players:GetPlayers()
                 local maxP = tonumber(MaxBox.Text) or 1
                 if count > maxP then
-                    setStatus("Server exceeded target, hopping...", Color3.fromRGB(255, 200, 100))
-                    local srv, _ = findBestServer(game.PlaceId, maxP, tonumber(MinBox.Text) or 0, {})
-                    if srv then
+                    setStatus("Server exceeded, hopping...", Color3.fromRGB(255, 200, 100))
+                    local candidates = findCandidates(game.PlaceId, maxP, tonumber(MinBox.Text) or 0, {})
+                    if #candidates > 0 then
                         pcall(function()
-                            TeleportService:TeleportToPlaceInstance(game.PlaceId, srv.id, LocalPlayer)
+                            TeleportService:TeleportToPlaceInstance(game.PlaceId, candidates[1].id, LocalPlayer)
                         end)
                     end
                 end
